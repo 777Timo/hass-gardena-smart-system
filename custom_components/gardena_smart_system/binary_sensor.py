@@ -12,7 +12,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import DOMAIN, PUMP_MODEL_KEYWORDS
 from .coordinator import GardenaSmartSystemCoordinator
 from .entities import GardenaOnlineEntity, GardenaEntity
 
@@ -32,6 +32,10 @@ async def async_setup_entry(
     for location in coordinator.locations.values():
         for device in location.devices.values():
             entities.append(GardenaOnlineBinarySensor(coordinator, device))
+
+            # Pump running binary sensor (uses BFF data)
+            if any(kw in (device.model_type or "").lower() for kw in PUMP_MODEL_KEYWORDS):
+                entities.append(GardenaPumpRunningSensor(coordinator, device))
 
     entities.append(GardenaWebSocketConnectedSensor(coordinator, entry.entry_id))
 
@@ -87,5 +91,40 @@ class GardenaWebSocketConnectedSensor(GardenaEntity, BinarySensorEntity):
             attrs.update({
                 "reconnect_attempts": self.coordinator.websocket_client.reconnect_attempts,
             })
+        return attrs
+
+
+class GardenaPumpRunningSensor(GardenaEntity, BinarySensorEntity):
+    """Binary sensor: True when the pressure pump motor is running."""
+
+    _attr_device_class = BinarySensorDeviceClass.RUNNING
+
+    def __init__(self, coordinator: GardenaSmartSystemCoordinator, device) -> None:
+        super().__init__(coordinator, device, "VALVE")
+        self._device_id = device.id
+        self._attr_name = f"{device.name} Pumpe läuft"
+        self._attr_unique_id = f"{device.id}_pump_bff_running"
+        self._attr_icon = "mdi:pump"
+
+    @property
+    def available(self) -> bool:
+        """Available only when BFF data has been fetched."""
+        return super().available and self.coordinator.get_pump_bff_data(self._device_id) is not None
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if pump_on_off == 'on'."""
+        bff = self.coordinator.get_pump_bff_data(self._device_id)
+        return bff.pump_on_off == "on" if bff else False
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs = super().extra_state_attributes
+        bff = self.coordinator.get_pump_bff_data(self._device_id)
+        if bff:
+            if bff.pump_state is not None:
+                attrs["pump_state"] = bff.pump_state
+            if bff.mode is not None:
+                attrs["mode"] = bff.mode
         return attrs
 

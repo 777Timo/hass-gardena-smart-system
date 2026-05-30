@@ -1,7 +1,7 @@
 """Data models for Gardena Smart System."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -87,8 +87,38 @@ class GardenaValveService(GardenaService):
 @dataclass
 class GardenaValveSetService(GardenaService):
     """Valve set service."""
-    
+
     pass
+
+
+@dataclass
+class GardenaPumpBFFData:
+    """Pump-specific telemetry fetched from the Gardena BFF API.
+
+    All fields map 1-to-1 to ability properties returned by
+    GET /v1/devices/{id}?locationId={lid}.
+    """
+
+    device_id: str
+    # pump ability (type: "pressure_pump")
+    pump_on_off: Optional[str] = None          # "on" / "off"
+    pump_state: Optional[int] = None
+    turn_on_pressure: Optional[float] = None   # Bar — Einschaltdruck
+    mode: Optional[str] = None                 # "auto" / "manual"
+    # outlet_pressure ability
+    outlet_pressure: Optional[float] = None    # Bar — aktueller Betriebsdruck
+    outlet_pressure_max: Optional[float] = None
+    # flow ability
+    flow_rate: Optional[float] = None          # l/h — aktuelle Durchflussrate
+    flow_total: Optional[float] = None         # m³ — Gesamt-Fördermenge
+    flow_since_last_reset: Optional[float] = None  # m³
+    dripping_alert: Optional[str] = None       # Leckageerkennungs-Schwellwert
+    # outlet_temperature ability
+    temperature: Optional[float] = None        # °C — Auslasstemperatur
+    frost_warning: Optional[str] = None        # "no_frost" / "frost"
+    # settings
+    leakage_detection: Optional[str] = None    # "watering" / …
+    turn_on_pressure_setting_id: Optional[str] = None  # UUID for PUT /settings/{id}
 
 
 @dataclass
@@ -253,4 +283,40 @@ class GardenaDataParser:
                 id=service_id,
                 type=service_type,
                 device_id=device_id
-            ) 
+            )
+
+    @staticmethod
+    def parse_bff_device(data: Dict[str, Any]) -> GardenaPumpBFFData:
+        """Parse a GET /v1/devices/{id} BFF response into GardenaPumpBFFData."""
+        device_data = data.get("devices", {})
+        result = GardenaPumpBFFData(device_id=device_data.get("id", ""))
+
+        for ability in device_data.get("abilities", []):
+            ability_name = ability.get("name")
+            # Build a flat name→value dict for this ability's properties
+            props = {p["name"]: p.get("value") for p in ability.get("properties", [])}
+
+            if ability_name == "pump":
+                result.pump_on_off = props.get("pump_on_off")
+                result.pump_state = props.get("pump_state")
+                result.turn_on_pressure = props.get("turn_on_pressure")
+                result.mode = props.get("mode")
+            elif ability_name == "outlet_pressure":
+                result.outlet_pressure = props.get("outlet_pressure")
+                result.outlet_pressure_max = props.get("outlet_pressure_max")
+            elif ability_name == "flow":
+                result.flow_rate = props.get("flow_rate")
+                result.flow_total = props.get("flow_total")
+                result.flow_since_last_reset = props.get("flow_since_last_reset")
+                result.dripping_alert = props.get("dripping_alert")
+            elif ability_name == "outlet_temperature":
+                result.temperature = props.get("temperature")
+                result.frost_warning = props.get("frost_warning")
+
+        for setting in device_data.get("settings", []):
+            if setting.get("name") == "leakage_detection":
+                result.leakage_detection = setting.get("value")
+            elif setting.get("name") == "turn_on_pressure":
+                result.turn_on_pressure_setting_id = setting.get("id")
+
+        return result

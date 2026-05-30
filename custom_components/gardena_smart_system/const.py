@@ -111,4 +111,7 @@ DEFAULT_VALVE_DURATION_SECONDS: Final = 3600
 # Attribute names
 ATTR_BATTERY_STATE: Final = "battery_state"
 ATTR_RF_LINK_LEVEL: Final = "rf_link_level"
-ATTR_RF_LINK_STATE: Final = "rf_link_state" 
+ATTR_RF_LINK_STATE: Final = "rf_link_state"
+
+# Pump device detection — substrings matched against device.model_type (case-insensitive)
+PUMP_MODEL_KEYWORDS: Final = ("pump",)

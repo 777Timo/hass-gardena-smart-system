@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Gardena Smart Pressure Pump support** via the Gardena BFF (Backend-for-Frontend) API — the same private API used by the official Gardena mobile and web app. Adds six new entities per pump device:
+  - `sensor.*_betriebsdruck` — current operating pressure (Bar)
+  - `sensor.*_durchfluss` — current flow rate (l/h)
+  - `sensor.*_gesamt_foerdermenge` — total volume pumped since factory reset (m³), includes `flow_since_last_reset` and `dripping_alert` attributes
+  - `sensor.*_auslasstemperatur` — outlet water temperature (°C) with frost warning attribute
+  - `sensor.*_einschaltdruck` — configured switch-on pressure (Bar, diagnostic)
+  - `binary_sensor.*_pumpe_laeuft` — True when pump motor is running
+- Pump on/off control now uses the BFF API (`watering_timer_1` ability) with automatic fallback to the public VALVE_CONTROL command
+- BFF pump data refreshes automatically every 5 minutes; BFF polling is stopped cleanly on integration unload
+
 ## [3.1.0-beta2] - 2026-05-28
 
 ### Fixed

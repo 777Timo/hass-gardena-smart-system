@@ -7,7 +7,7 @@ from typing import Any
 
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfTemperature, UnitOfTime
+from homeassistant.const import PERCENTAGE, UnitOfTemperature, UnitOfTime, UnitOfPressure, UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -18,6 +18,7 @@ from .const import (
     ATTR_RF_LINK_LEVEL,
     ATTR_RF_LINK_STATE,
     MOWER_INFORMATIONAL_CODES,
+    PUMP_MODEL_KEYWORDS,
 )
 from .coordinator import GardenaSmartSystemCoordinator
 from .entities import GardenaEntity
@@ -75,6 +76,17 @@ async def async_setup_entry(
                 valve_services = device.services["VALVE"]
                 for valve_service in valve_services:
                     entities.append(GardenaValveRemainingTimeSensor(coordinator, device, valve_service))
+
+            # Add BFF pump sensors for pressure pump devices
+            is_pump = any(kw in (device.model_type or "").lower() for kw in PUMP_MODEL_KEYWORDS)
+            if is_pump:
+                entities.extend([
+                    GardenaPumpPressureSensor(coordinator, device),
+                    GardenaPumpFlowRateSensor(coordinator, device),
+                    GardenaPumpFlowTotalSensor(coordinator, device),
+                    GardenaPumpTemperatureSensor(coordinator, device),
+                    GardenaPumpTurnOnPressureSensor(coordinator, device),
+                ])
 
             # Add sensor entities if available
             if "SENSOR" in device.services:
@@ -537,4 +549,149 @@ class GardenaAPIUsageSensor(SensorEntity):
     async def async_update(self) -> None:
         """No-op: value is computed on read from the shared tracker."""
 
+
+# ---------------------------------------------------------------------------
+# Gardena Smart Pressure Pump — BFF API sensors
+# ---------------------------------------------------------------------------
+
+class _GardenaPumpBFFSensor(GardenaEntity, SensorEntity):
+    """Base class for sensors that read from coordinator.pump_bff_data."""
+
+    def __init__(self, coordinator: GardenaSmartSystemCoordinator, device) -> None:
+        super().__init__(coordinator, device, "VALVE")
+        self._device_id = device.id
+
+    def _bff(self):
+        """Return current BFF pump data or None."""
+        return self.coordinator.get_pump_bff_data(self._device_id)
+
+    @property
+    def available(self) -> bool:
+        """Available when parent device is available AND BFF data has been fetched."""
+        return super().available and self._bff() is not None
+
+
+class GardenaPumpPressureSensor(_GardenaPumpBFFSensor):
+    """Current operating pressure at the pump outlet (Bar)."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_device_class = SensorDeviceClass.PRESSURE
+    _attr_native_unit_of_measurement = UnitOfPressure.BAR
+    _attr_icon = "mdi:gauge"
+
+    def __init__(self, coordinator, device) -> None:
+        super().__init__(coordinator, device)
+        self._attr_name = f"{device.name} Betriebsdruck"
+        self._attr_unique_id = f"{device.id}_pump_bff_outlet_pressure"
+
+    @property
+    def native_value(self) -> float | None:
+        bff = self._bff()
+        return bff.outlet_pressure if bff else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs = super().extra_state_attributes
+        bff = self._bff()
+        if bff and bff.outlet_pressure_max is not None:
+            attrs["outlet_pressure_max_bar"] = bff.outlet_pressure_max
+        return attrs
+
+
+class GardenaPumpFlowRateSensor(_GardenaPumpBFFSensor):
+    """Current flow rate (l/h)."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_device_class = SensorDeviceClass.VOLUME_FLOW_RATE
+    _attr_native_unit_of_measurement = "L/h"
+    _attr_icon = "mdi:water-pump"
+
+    def __init__(self, coordinator, device) -> None:
+        super().__init__(coordinator, device)
+        self._attr_name = f"{device.name} Durchfluss"
+        self._attr_unique_id = f"{device.id}_pump_bff_flow_rate"
+
+    @property
+    def native_value(self) -> float | None:
+        bff = self._bff()
+        return bff.flow_rate if bff else None
+
+
+class GardenaPumpFlowTotalSensor(_GardenaPumpBFFSensor):
+    """Total volume pumped since factory reset (m³) — Gesamt-Fördermenge."""
+
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_device_class = SensorDeviceClass.WATER
+    _attr_native_unit_of_measurement = UnitOfVolume.CUBIC_METERS
+    _attr_icon = "mdi:water-outline"
+
+    def __init__(self, coordinator, device) -> None:
+        super().__init__(coordinator, device)
+        self._attr_name = f"{device.name} Gesamt-Fördermenge"
+        self._attr_unique_id = f"{device.id}_pump_bff_flow_total"
+
+    @property
+    def native_value(self) -> float | None:
+        bff = self._bff()
+        return bff.flow_total if bff else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs = super().extra_state_attributes
+        bff = self._bff()
+        if bff:
+            if bff.flow_since_last_reset is not None:
+                attrs["flow_since_last_reset_m3"] = bff.flow_since_last_reset
+            if bff.dripping_alert is not None:
+                attrs["dripping_alert"] = bff.dripping_alert
+            if bff.leakage_detection is not None:
+                attrs["leakage_detection"] = bff.leakage_detection
+        return attrs
+
+
+class GardenaPumpTemperatureSensor(_GardenaPumpBFFSensor):
+    """Outlet water temperature (°C)."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_icon = "mdi:thermometer-water"
+
+    def __init__(self, coordinator, device) -> None:
+        super().__init__(coordinator, device)
+        self._attr_name = f"{device.name} Auslasstemperatur"
+        self._attr_unique_id = f"{device.id}_pump_bff_temperature"
+
+    @property
+    def native_value(self) -> float | None:
+        bff = self._bff()
+        return bff.temperature if bff else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs = super().extra_state_attributes
+        bff = self._bff()
+        if bff and bff.frost_warning is not None:
+            attrs["frost_warning"] = bff.frost_warning
+        return attrs
+
+
+class GardenaPumpTurnOnPressureSensor(_GardenaPumpBFFSensor):
+    """Configured switch-on pressure (Bar) — Einschaltdruck."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_device_class = SensorDeviceClass.PRESSURE
+    _attr_native_unit_of_measurement = UnitOfPressure.BAR
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:gauge-low"
+
+    def __init__(self, coordinator, device) -> None:
+        super().__init__(coordinator, device)
+        self._attr_name = f"{device.name} Einschaltdruck"
+        self._attr_unique_id = f"{device.id}_pump_bff_turn_on_pressure"
+
+    @property
+    def native_value(self) -> float | None:
+        bff = self._bff()
+        return bff.turn_on_pressure if bff else None
 

@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
-from typing import Any, Dict
+from typing import Any, Callable, Dict, Optional
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import DOMAIN
+from .bff_client import GardenaBFFClient, GardenaBFFError
+from .const import DOMAIN, PUMP_MODEL_KEYWORDS
 from .gardena_client import GardenaSmartSystemClient
-from .models import GardenaLocation
+from .models import GardenaDataParser, GardenaLocation, GardenaPumpBFFData
 from .websocket_client import GardenaWebSocketClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,7 +27,12 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
         self.locations: Dict[str, GardenaLocation] = {}
         self.websocket_client: GardenaWebSocketClient | None = None
         self._initial_data_loaded = False
-        
+
+        # BFF (Backend-for-Frontend) API — pump-specific telemetry
+        self._bff_client: Optional[GardenaBFFClient] = None
+        self.pump_bff_data: Dict[str, GardenaPumpBFFData] = {}
+        self._bff_unsub: Optional[Callable] = None
+
         # Set update interval to None to disable periodic updates
         # All updates will come through WebSocket
         super().__init__(
@@ -63,7 +70,7 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
             
             # Notify entities that WebSocket client is now available
             self.async_set_updated_data(self.locations)
-            
+
         except Exception as e:
             _LOGGER.error(f"Failed to start WebSocket client: {e}")
 
@@ -243,21 +250,75 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
                     self.locations[location.id] = location
             
             _LOGGER.info("Initial data load completed. All future updates will come via WebSocket.")
+
+            # Fetch BFF pump data and schedule periodic refresh
+            await self._fetch_all_pump_bff_data()
+            self._schedule_bff_polling()
+
             return self.locations
-            
+
         except Exception as e:
             _LOGGER.error(f"Error loading initial data: {e}")
             raise
 
+    async def _fetch_all_pump_bff_data(self) -> None:
+        """Fetch BFF telemetry for all pump devices in all locations."""
+        if not self._bff_client:
+            self._bff_client = GardenaBFFClient(self.client.auth_manager)
+
+        for location in self.locations.values():
+            for device in location.devices.values():
+                if not any(kw in (device.model_type or "").lower() for kw in PUMP_MODEL_KEYWORDS):
+                    continue
+                try:
+                    data = await self._bff_client.get_device(device.id, location.id)
+                    self.pump_bff_data[device.id] = GardenaDataParser.parse_bff_device(data)
+                    _LOGGER.debug(
+                        "BFF pump data fetched for %s: pressure=%.1f Bar, flow=%.0f l/h",
+                        device.name,
+                        self.pump_bff_data[device.id].outlet_pressure or 0,
+                        self.pump_bff_data[device.id].flow_rate or 0,
+                    )
+                except GardenaBFFError as exc:
+                    _LOGGER.warning("BFF data unavailable for pump %s: %s", device.name, exc)
+
+    def _schedule_bff_polling(self) -> None:
+        """Schedule BFF data refresh every 5 minutes."""
+        if self._bff_unsub is not None:
+            return
+
+        async def _refresh(_now: Any) -> None:
+            await self._fetch_all_pump_bff_data()
+            self.async_set_updated_data(self.locations)
+
+        self._bff_unsub = async_track_time_interval(
+            self.hass, _refresh, timedelta(minutes=5)
+        )
+        _LOGGER.debug("BFF pump polling scheduled every 5 minutes")
+
+    def get_pump_bff_data(self, device_id: str) -> Optional[GardenaPumpBFFData]:
+        """Return cached BFF pump data for the given device, or None."""
+        return self.pump_bff_data.get(device_id)
+
     async def async_shutdown(self) -> None:
         """Shutdown the coordinator."""
         _LOGGER.debug("Shutting down Gardena Smart System coordinator")
-        
+
+        # Cancel BFF polling timer
+        if self._bff_unsub is not None:
+            self._bff_unsub()
+            self._bff_unsub = None
+
+        # Close BFF client
+        if self._bff_client:
+            await self._bff_client.close()
+            self._bff_client = None
+
         # Stop WebSocket client
         if self.websocket_client:
             await self.websocket_client.stop()
             self.websocket_client = None
-        
+
         # Close client
         if self.client:
             await self.client.close()
