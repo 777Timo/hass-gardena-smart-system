@@ -659,7 +659,7 @@ class GardenaPumpTemperatureSensor(_GardenaPumpBFFSensor):
 
     def __init__(self, coordinator, device) -> None:
         super().__init__(coordinator, device)
-        self._attr_name = f"{device.name} Auslasstemperatur"
+        self._attr_name = f"{device.name} Wassertemperatur"
         self._attr_unique_id = f"{device.id}_pump_bff_temperature"
 
     @property

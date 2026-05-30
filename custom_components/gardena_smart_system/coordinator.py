@@ -6,7 +6,7 @@ from datetime import timedelta
 from typing import Any, Callable, Dict, Optional
 
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .bff_client import GardenaBFFClient, GardenaBFFError
@@ -282,19 +282,28 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
                 except GardenaBFFError as exc:
                     _LOGGER.warning("BFF data unavailable for pump %s: %s", device.name, exc)
 
+    def _any_pump_running(self) -> bool:
+        """Return True if at least one pump is currently running."""
+        return any(d.pump_on_off == "on" for d in self.pump_bff_data.values())
+
     def _schedule_bff_polling(self) -> None:
-        """Schedule BFF data refresh every 5 minutes."""
+        """Schedule the next BFF poll — 10 s while running, 30 s when stopped."""
         if self._bff_unsub is not None:
             return
+        self._arm_bff_timer()
+
+    def _arm_bff_timer(self) -> None:
+        """Arm a one-shot timer for the next BFF poll."""
+        delay = 10 if self._any_pump_running() else 30
 
         async def _refresh(_now: Any) -> None:
+            self._bff_unsub = None  # timer has fired
             await self._fetch_all_pump_bff_data()
             self.async_set_updated_data(self.locations)
+            self._arm_bff_timer()  # re-arm with updated interval
 
-        self._bff_unsub = async_track_time_interval(
-            self.hass, _refresh, timedelta(minutes=5)
-        )
-        _LOGGER.debug("BFF pump polling scheduled every 5 minutes")
+        self._bff_unsub = async_call_later(self.hass, delay, _refresh)
+        _LOGGER.debug("BFF pump poll in %d s (pump running: %s)", delay, self._any_pump_running())
 
     def get_pump_bff_data(self, device_id: str) -> Optional[GardenaPumpBFFData]:
         """Return cached BFF pump data for the given device, or None."""
