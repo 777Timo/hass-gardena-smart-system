@@ -518,4 +518,14 @@ See [CHANGELOG.md](CHANGELOG.md) for a full list of changes, fixes, and breaking
 
 - [Gardena Smart System API v2](https://developer.husqvarnagroup.cloud/)
 - [Home Assistant Documentation](https://developers.home-assistant.io/)
+
+---
+
+## 🤖 Vibe Coding
+
+The **Gardena Smart Pressure Pump** support in this fork was implemented using [vibe coding](https://en.wikipedia.org/wiki/Vibe_coding) — AI-assisted development with [Claude Code](https://claude.ai/code) by Anthropic.
+
+The pump feature required reverse-engineering the private Gardena BFF API (the backend used by the official mobile app) by analysing HAR traffic captures from the Gardena web app. Claude Code identified the API endpoints, decoded the response structure, implemented the BFF client, and wired up all sensor entities — without a single line written by hand.
+
+If you're curious: the entire pump implementation (6 new HA entities, adaptive polling, BFF client) took one session.
 - [Integration Guide](https://developers.home-assistant.io/docs/creating_integration_manifest/) 
