@@ -5,12 +5,13 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
+from homeassistant.components.sensor import RestoreSensor, SensorEntity, SensorDeviceClass, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfTemperature, UnitOfTime, UnitOfPressure, UnitOfVolume
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
@@ -86,6 +87,8 @@ async def async_setup_entry(
                     GardenaPumpPressureSensor(coordinator, device),
                     GardenaPumpFlowRateSensor(coordinator, device),
                     GardenaPumpFlowTotalSensor(coordinator, device),
+                    GardenaPumpAccumulatedFlowSensor(coordinator, device),
+                    GardenaPumpLastRunFlowSensor(coordinator, device),
                     GardenaPumpTemperatureSensor(coordinator, device),
                     GardenaPumpTurnOnPressureSensor(coordinator, device),
                 ])
@@ -646,7 +649,12 @@ class GardenaPumpPressureSensor(_GardenaPumpBFFSensor):
 
 
 class GardenaPumpFlowRateSensor(_GardenaPumpBFFSensor):
-    """Current flow rate (l/h)."""
+    """Current flow rate (l/h).
+
+    The API returns a fixed nominal value (e.g. 100 L/h) even when the pump
+    is stopped. We return 0 when pump_on_off != "on" so that a Riemann-sum
+    integration helper in HA can derive an accurate total volume.
+    """
 
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_device_class = SensorDeviceClass.VOLUME_FLOW_RATE
@@ -661,7 +669,11 @@ class GardenaPumpFlowRateSensor(_GardenaPumpBFFSensor):
     @property
     def native_value(self) -> float | None:
         bff = self._bff()
-        return bff.flow_rate if bff else None
+        if bff is None:
+            return None
+        if bff.pump_on_off != "on":
+            return 0
+        return bff.flow_rate
 
 
 class GardenaPumpFlowTotalSensor(_GardenaPumpBFFSensor):
@@ -741,4 +753,129 @@ class GardenaPumpTurnOnPressureSensor(_GardenaPumpBFFSensor):
     def native_value(self) -> float | None:
         bff = self._bff()
         return bff.turn_on_pressure if bff else None
+
+
+class GardenaPumpAccumulatedFlowSensor(GardenaEntity, RestoreSensor):
+    """Accumulated total volume pumped (L), computed from flow_rate × runtime.
+
+    Integrates flow_rate (L/h) over each poll interval using a left-endpoint
+    Riemann sum. Only accumulates while pump_on_off == "on". State is
+    persisted across HA restarts via RestoreSensor.
+    """
+
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_device_class = SensorDeviceClass.WATER
+    _attr_native_unit_of_measurement = UnitOfVolume.LITERS
+    _attr_icon = "mdi:water-pump"
+
+    def __init__(self, coordinator: GardenaSmartSystemCoordinator, device) -> None:
+        super().__init__(coordinator, device, "VALVE")
+        self._device_id = device.id
+        self._attr_name = f"{device.name} Geförderte Menge"
+        self._attr_unique_id = f"{device.id}_pump_accumulated_flow"
+        self._accumulated_liters: float = 0.0
+        self._last_update: dt_util.dt.datetime | None = None
+
+    def _bff(self):
+        return self.coordinator.get_pump_bff_data(self._device_id)
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._bff() is not None
+
+    async def async_added_to_hass(self) -> None:
+        """Restore accumulated value from last known state after HA restart."""
+        await super().async_added_to_hass()
+        if (last := await self.async_get_last_sensor_data()) is not None:
+            try:
+                self._accumulated_liters = float(last.native_value or 0)
+            except (TypeError, ValueError):
+                self._accumulated_liters = 0.0
+        self._last_update = dt_util.utcnow()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Accumulate flow when pump is running, then trigger state write."""
+        bff = self._bff()
+        now = dt_util.utcnow()
+
+        if bff and bff.pump_on_off == "on" and bff.flow_rate and self._last_update:
+            elapsed_hours = (now - self._last_update).total_seconds() / 3600
+            self._accumulated_liters += bff.flow_rate * elapsed_hours
+
+        self._last_update = now
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> float:
+        return round(self._accumulated_liters, 3)
+
+
+class GardenaPumpLastRunFlowSensor(GardenaEntity, RestoreSensor):
+    """Volume pumped during the last completed pump run (L).
+
+    Counts liters while the pump runs. When pump_on_off transitions
+    "on" → "off", the current-run total is frozen as the sensor value.
+    Resets internal counter each time the pump starts again.
+    State is persisted across HA restarts via RestoreSensor.
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_device_class = SensorDeviceClass.WATER
+    _attr_native_unit_of_measurement = UnitOfVolume.LITERS
+    _attr_icon = "mdi:water-sync"
+
+    def __init__(self, coordinator: GardenaSmartSystemCoordinator, device) -> None:
+        super().__init__(coordinator, device, "VALVE")
+        self._device_id = device.id
+        self._attr_name = f"{device.name} Letzter Pumpenlauf"
+        self._attr_unique_id = f"{device.id}_pump_last_run_flow"
+        self._last_run_liters: float = 0.0   # shown as sensor state
+        self._current_run_liters: float = 0.0 # accumulator for active run
+        self._last_update: dt_util.dt.datetime | None = None
+        self._was_running: bool = False
+
+    def _bff(self):
+        return self.coordinator.get_pump_bff_data(self._device_id)
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._bff() is not None
+
+    async def async_added_to_hass(self) -> None:
+        """Restore last-run value after HA restart."""
+        await super().async_added_to_hass()
+        if (last := await self.async_get_last_sensor_data()) is not None:
+            try:
+                self._last_run_liters = float(last.native_value or 0)
+            except (TypeError, ValueError):
+                self._last_run_liters = 0.0
+        self._last_update = dt_util.utcnow()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        bff = self._bff()
+        now = dt_util.utcnow()
+        is_running = bff is not None and bff.pump_on_off == "on"
+
+        if is_running and not self._was_running:
+            # Pump just started — reset current-run counter
+            self._current_run_liters = 0.0
+
+        if is_running and bff.flow_rate and self._last_update:
+            elapsed_hours = (now - self._last_update).total_seconds() / 3600
+            self._current_run_liters += bff.flow_rate * elapsed_hours
+
+        if not is_running and self._was_running:
+            # Pump just stopped — freeze current run as last-run value
+            self._last_run_liters = self._current_run_liters
+            self._current_run_liters = 0.0
+
+        self._was_running = is_running
+        self._last_update = now
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> float:
+        return round(self._last_run_liters, 3)
 
