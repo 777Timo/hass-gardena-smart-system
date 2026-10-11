@@ -820,7 +820,7 @@ class GardenaPumpLastRunFlowSensor(GardenaEntity, RestoreSensor):
     State is persisted across HA restarts via RestoreSensor.
     """
 
-    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_state_class = SensorStateClass.TOTAL
     _attr_device_class = SensorDeviceClass.WATER
     _attr_native_unit_of_measurement = UnitOfVolume.LITERS
     _attr_icon = "mdi:water-sync"
