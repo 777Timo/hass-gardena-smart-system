@@ -16,6 +16,10 @@ All notable changes to this project will be documented in this file.
 - Pump on/off control now uses the BFF API (`watering_timer_1` ability) with automatic fallback to the public VALVE_CONTROL command
 - BFF pump data refreshes automatically every 5 minutes; BFF polling is stopped cleanly on integration unload
 
+### Fixed
+
+- BFF pump polling no longer stops for good after an unexpected error (e.g. a request timeout). Before, pressure, flow and "pump running" stayed frozen until the next Home Assistant restart (fork only, no upstream issue)
+
 ## [3.2.1] - 2026-10-11
 
 ### Fixed

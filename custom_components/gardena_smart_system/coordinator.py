@@ -32,6 +32,7 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
         self._bff_client: Optional[GardenaBFFClient] = None
         self.pump_bff_data: Dict[str, GardenaPumpBFFData] = {}
         self._bff_unsub: Optional[Callable] = None
+        self._bff_shutdown = False
 
         # Set update interval to None to disable periodic updates
         # All updates will come through WebSocket
@@ -318,9 +319,17 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
 
         async def _refresh(_now: Any) -> None:
             self._bff_unsub = None  # timer has fired
-            await self._fetch_all_pump_bff_data()
-            self.async_set_updated_data(self.locations)
-            self._arm_bff_timer()  # re-arm with updated interval
+            try:
+                await self._fetch_all_pump_bff_data()
+                self.async_set_updated_data(self.locations)
+            except Exception:  # noqa: BLE001 - polling must survive any error
+                _LOGGER.exception("BFF pump poll failed, retrying")
+            finally:
+                # Always re-arm: an uncaught error (e.g. asyncio.TimeoutError,
+                # which is no aiohttp.ClientError) used to stop polling until
+                # the next HA restart, leaving pressure/running sensors stale.
+                if not self._bff_shutdown:
+                    self._arm_bff_timer()
 
         self._bff_unsub = async_call_later(self.hass, delay, _refresh)
         _LOGGER.debug("BFF pump poll in %d s (pump running: %s)", delay, self._any_pump_running())
@@ -334,6 +343,7 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
         _LOGGER.debug("Shutting down Gardena Smart System coordinator")
 
         # Cancel BFF polling timer
+        self._bff_shutdown = True
         if self._bff_unsub is not None:
             self._bff_unsub()
             self._bff_unsub = None
